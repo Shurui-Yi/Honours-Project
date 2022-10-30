@@ -1,0 +1,193 @@
+---
+title: "Example Coding"
+author: "Shurui Yi"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reshape2)
+library(ggplot2)
+# install.packages("remotes")
+# BiocManager::install("tanaylab/metacell")
+library(metacell)
+library(SingleCellExperiment)
+```
+# Load data
+```{r}
+# prepared scRNA-seq data of interest
+sc_L2_log_102g
+```
+
+# Simulation
+
+## 1. Data simulation using the mean and variance of expressed cells
+
+```{r, message=FALSE, warning=FALSE}
+simulatedno0_L2_log_102g <- simulate_logcounts(sc_L2_log_102g,distribution="mv_gamma",n_cells=5000,mean_type="expressed")
+
+# calculate the counts
+simulatedno0_L2_counts_102g <- apply(simulatedno0_L2_log_102g,c(1,2), function(x) 2^x)
+```
+
+## 2. introduing sparsity (select 50% features to add 90% zeros as an example)
+```{r}
+sparse_0.5_0.9_L2_log_102g <- add_zeros(0.5,0.9,simulatedno0_L2_log_102g)#50% features 90% cells to add zeros
+
+sparse_0.5_0.9_L2_log_102g_idx <- sparse_0.5_0.9_L2_log_102g[[1]] #index of selected features
+sparse_0.5_0.9_L2_log_102g_data <- sparse_0.5_0.9_L2_log_102g[[2]]#sparse data 
+
+sparse_0.5_features <- colnames(sparse_0.5_0.9_L2_log_102g_data)[sparse_0.5_0.9_L2_log_102g_idx] # get feature names(here, is the gene names)
+```
+
+
+# Meta-cell aggregation using the simulated data as an example
+
+## Meta Cell (Baran)
+```{r}
+# prepare a folder named "MCBaran_sparse_0.5_0.9" or remove it in the direction
+
+# initializing scdb to testdb/
+if(!dir.exists("MCBaran_sparse_0.5_0.9/testdb")) dir.create("MCBaran_sparse_0.5_0.9/testdb/")
+scdb_init("MCBaran_sparse_0.5_0.9/testdb/", force_reinit=T)
+
+if(!dir.exists("MCBaran_sparse_0.5_0.9/figs")) dir.create("MCBaran_sparse_0.5_0.9/figs/")
+scfigs_init("MCBaran_sparse_0.5_0.9/figs/")
+
+#1. prepare single cell experiment object (this step can be skipped if the object has beenSingleCellExperiment object)
+sparse_0.5_0.9_L2_counts_102g_data <- apply(sparse_0.5_0.9_L2_log_102g_data,c(1,2), function(x) 2^x) #convert to counts
+sparse_0.5_0.9_data <- round(sparse_0.5_0.9_L2_counts_102g_data)# round to integer
+colnames(sparse_0.5_0.9_data) <- c(1:ncol(sparse_0.5_0.9_data)) #rename column
+nCount_RNA <- as.numeric(colSums(sparse_0.5_0.9_data)) #calculate col sum
+
+sparse_0.5_0.9_sce <- SingleCellExperiment(list(counts=sparse_0.5_0.9_data),colData=DataFrame(nCount_RNA=nCount_RNA))
+
+#2. prepare matrix
+mat = scm_import_sce_to_mat(sparse_0.5_0.9_sce)
+scdb_add_mat("test", mat)
+#3. prepare statistics
+## gstat
+mcell_add_gene_stat_edited(gstat_id="test", mat_id="test",force = T)
+## gset
+mcell_gset_filter_varmean(gset_id="test_feats", gstat_id="test", T_vm= -3.7, force_new=T)#T_vm is the threshold on normalised var/mean
+mcell_gset_filter_cov(gset_id = "test_feats", gstat_id="test", T_tot=10, T_top3=2)#gstat$tot > T_tot & gstat$ds_top3 > T_top3
+
+#4. get meta cells
+mcell_add_cgraph_from_mat_bknn(mat_id="test", 
+                gset_id = "test_feats", 
+                graph_id="test_graph",
+                K=5,
+                dsamp=T)
+
+feat = gset_get_feat_mat(gset_id= "test_feats",, mat_id ="test", downsamp=T, add_non_dsamp=T)#will downsample the matrix, N= 534
+
+mcell_coclust_from_graph_resamp(
+                coc_id="test_coc500", 
+                graph_id="test_graph",
+                min_mc_size=3, 
+                p_resamp=0.75, n_resamp=500)
+
+mcell_mc_from_coclust_balanced(
+                coc_id="test_coc500", 
+                mat_id= "test",
+                mc_id= "test_mc", 
+                K=5, min_mc_size=3, alpha=2)
+
+## returned metacells index
+mc_sparse_0.5_0.9_k5 = scdb_mc("test_mc_f")
+
+#5. get aggregated data matrix
+mc_sparse_0.5_0.9_k5_nodes <- mc_sparse_0.5_0.9_k5@mc
+mc_sparse_0.5_0.9_k5_nodes <- as.data.frame(mc_sparse_0.5_0.9_k5_nodes)
+length(unique(mc_sparse_0.5_0.9_k5_nodes$mc_sparse_0.5_0.9_k5_nodes))#331
+
+sort(unique(mc_sparse_0.5_0.9_k5_nodes$mc_sparse_0.5_0.9_k5_nodes))
+
+# GET MAT
+#set the col names for simulated data
+colnames(sparse_0.5_0.9_L2_log_102g_data) <- c(1:ncol(sparse_0.5_0.9_L2_log_102g_data)) 
+
+# for meta cell node df:
+#set the col name as node
+colnames(mc_sparse_0.5_0.9_k5_nodes)[1] <- "node"
+#set the row names as cell
+mc_sparse_0.5_0.9_k5_nodes$cell <- rownames(mc_sparse_0.5_0.9_k5_nodes)#3106 cells
+
+#prepare temp table to hold mc results
+num_nodes <- length(unique(mc_sparse_0.5_0.9_k5_nodes$node))
+mat_temp <- matrix(0,nrow=nrow(sparse_0.5_0.9_L2_log_102g_data), ncol=num_nodes)
+# set row and col names
+rownames(mat_temp) <- rownames(sparse_0.5_0.9_L2_log_102g_data)
+colnames(mat_temp) <- sort(unique(mc_sparse_0.5_0.9_k5_nodes$node))
+
+# go through each metacells
+for (g in 1:nrow(mat_temp)){
+  print(g)
+    for (c in 1:ncol(mat_temp)){
+       print(c)
+      # get the cells for the gene and mc node
+      cell_idx <- mc_sparse_0.5_0.9_k5_nodes[mc_sparse_0.5_0.9_k5_nodes$node== colnames(mat_temp)[c],]$cell
+      
+      #get data of selected cells
+      avg <- mean(sparse_0.5_0.9_L2_log_102g_data[g,cell_idx])
+      print(avg)
+      mat_temp[g,c] <- avg
+     
+    }
+    
+} 
+# the data matrix
+B_k5_sparse_0.5_0.9_L2_log_102g_data<- mat_temp
+
+```
+
+
+## Meta Cell (Disjoint)
+```{r}
+# Meta Cell (Disjoint) using walktrap 
+D_k3_sparse_0.5_0.9_L2_log_102g_data <- get_mc_disjoint(sparse_0.5_0.9_L2_log_102g_data,k=3)#102 47
+# Meta Cell (Disjoint) using louvain 
+D_L_k3_simulatedno0_L2_log_102g <- get_mc_disjoint_Louvain(simulatedno0_L2_log_102g,k=3)#102 25
+```
+
+
+## Meta Cell (Overlapped)
+```{r}
+# Meta Cell (Overlapped)
+O_k10_sparse_0.5_0.9_L2_log_102g_data <- get_mc_overlapped(sparse_0.5_0.9_L2_log_102g_data,k=10) # K can be replaced by any number from 1 to 20
+```
+
+
+# Correlation for feature pairs
+```{r}
+# for non sparse data:
+# get correlation of simulated
+simulatedno0_L2_log_102g_Pcor <- get_cor(simulatedno0_L2_log_102g,"pearson") #get correlation matrix
+simulatedno0_L2_log_102g_Pcor_df <- get_cor_uppertri(simulatedno0_L2_log_102g_Pcor,"simulatedno0") # get correlation dataframe for each feature pairs (no replicate)
+
+# for sparse data:
+sparse_0.5_0.9_L2_log_102g_Pcor <- get_cor(sparse_0.5_0.9_L2_log_102g_data ,"pearson")
+sparse_0.5_0.9_L2_log_102g_Pcor_df <- get_cor_uppertri_type(sparse_0.5_0.9_L2_log_102g_Pcor,"sparse_0.5_0.9",sparse_0.5_features)
+
+## same for getting correlation of aggregated data (use overlapped_k10 as the example)
+O_k10_sparse_0.5_0.9_L2_log_102g_Pcor <- get_cor(O_k10_sparse_0.5_0.9_L2_log_102g_data  ,"pearson")
+O_k10_sparse_0.5_0.9_L2_log_102g_Pcor_df <- get_cor_uppertri_type(O_k10_sparse_0.5_0.9_L2_log_102g_Pcor,"O_k10_sparse_0.5_0.9",sparse_0.5_features)
+
+## all data frame can be merged
+mc_sparse_0.5_0.9_Pcor_df <- merge(simulatedno0_L2_log_102g_Pcor_df,sparse_0.5_0.9_L2_log_102g_Pcor_df, by=c("gene1","gene2"))
+mc_sparse_0.5_0.9_Pcor_df <- merge(mc_sparse_0.5_0.9_Pcor_df,O_k10_sparse_0.5_0.9_L2_log_102g_Pcor_df, by=c("gene1","gene2","type"))
+```
+
+# Get correlation strength difference and RMSE
+```{r}
+# correlation of sparse data and the ground truth
+mc_sparse_0.5_0.9_Pcor_df$sparse_0.5_0.9_sim_diff <- abs(mc_sparse_0.5_0.5_Pcor_df$sparse_0.5_0.9)-abs(mc_sparse_0.5_0.9_Pcor_df$simulatedno0)
+
+# correlation of aggregated sparse data and the ground truth
+mc_sparse_0.5_0.9_Pcor_df$sparse_0.5_0.9_sim_diff <- abs(mc_sparse_0.5_0.5_Pcor_df$O_k10_sparse_0.5_0.9)-abs(mc_sparse_0.5_0.9_Pcor_df$simulatedno0)
+
+
+# calculate the RMSE between aggregated sparse data and the ground truth
+calculate_rms(mc_sparse_0.5_0.9_Pcor_df$simulatedno0,mc_sparse_0.5_0.9_Pcor_df$O_k10_sparse_0.5_0.9)
+```
+
